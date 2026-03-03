@@ -21,8 +21,13 @@ import { assertValidParams } from "./validation.js";
 const SERVICE_REFRESH_TIMEOUT_MS = 60_000;
 
 // Candidate entry points to try when invoking the updated install.
-// Mirrors the logic in refreshGatewayServiceEnv() in the CLI update-command.
-const GATEWAY_INSTALL_ENTRY_CANDIDATES = ["dist/entry.js", "dist/entry.mjs", "dist/index.js"];
+// Mirrors resolveGatewayInstallEntrypointCandidates() in the CLI update-command.
+const GATEWAY_INSTALL_ENTRY_CANDIDATES = [
+  "dist/entry.js",
+  "dist/entry.mjs",
+  "dist/index.js",
+  "dist/index.mjs",
+];
 
 /**
  * After a successful npm/pnpm update, rewrite the service unit file (systemd /
@@ -64,6 +69,10 @@ async function refreshGatewayServiceEnv(root: string): Promise<void> {
       `service env refresh failed (${entryPath}): ${(res.stderr || res.stdout).trim().split("\n").slice(-3).join("\n")}`,
     );
   }
+  // No candidate entry point was found — throw so the call-site .catch logs a warning.
+  throw new Error(
+    `service env refresh skipped: no entry point found under ${root} (tried ${GATEWAY_INSTALL_ENTRY_CANDIDATES.join(", ")})`,
+  );
 }
 
 export const updateHandlers: GatewayRequestHandlers = {
@@ -146,11 +155,19 @@ export const updateHandlers: GatewayRequestHandlers = {
     // Only restart the gateway when the update actually succeeded.
     // Restarting after a failed update leaves the process in a broken state
     // (corrupted node_modules, partial builds) and causes a crash loop.
-    if (result.status === "ok" && result.root && (result.mode === "npm" || result.mode === "pnpm")) {
-      // Refresh the service unit file so OPENCLAW_SERVICE_VERSION reflects the
-      // newly installed version before we do the SIGUSR1 in-place reload.
-      // Failures are non-fatal: log a warning and proceed with the restart.
-      refreshGatewayServiceEnv(result.root).catch((err) => {
+
+    // Before scheduling the SIGUSR1 in-place reload, rewrite the service unit
+    // file so that OPENCLAW_SERVICE_VERSION reflects the newly installed
+    // version.  We await this so the unit is written before the restart signal
+    // fires.  Failures are non-fatal: a warning is logged and the restart
+    // proceeds; the only consequence is the cosmetic version mismatch that
+    // this call is trying to fix.
+    if (
+      result.status === "ok" &&
+      result.root &&
+      (result.mode === "npm" || result.mode === "pnpm")
+    ) {
+      await refreshGatewayServiceEnv(result.root).catch((err) => {
         context?.logGateway?.warn(`update.run: service env refresh failed: ${String(err)}`);
       });
     }
